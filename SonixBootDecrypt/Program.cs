@@ -168,8 +168,7 @@ try
 
     // Setup AES
     KeyParameter keyParameterRound = new KeyParameter(inKey);
-    KeyParameter keyParameterIv = new KeyParameter(inKey.AsSpan(0, 0x10).ToArray());
-    byte[] ivMaterial = inKey.AsSpan(0x10, 0x10).ToArray();
+    KeyParameter keyParameterIv = new KeyParameter(inKey, 0, 16);
 
     // Precalculate some stuff for hot path
     byte[] cbcPrecalculated;
@@ -198,7 +197,7 @@ try
     uint base2 = baseUIntSpan[2];
     uint base3 = baseUIntSpan[3];
 
-    var ivMaterialUIntSpan = MemoryMarshal.Cast<byte, uint>(ivMaterial);
+    var ivMaterialUIntSpan = MemoryMarshal.Cast<byte, uint>(inKey.AsSpan(0x10, 0x10));
     uint iv0 = ivMaterialUIntSpan[0];
     uint iv1 = ivMaterialUIntSpan[1];
     uint iv2 = ivMaterialUIntSpan[2];
@@ -222,11 +221,11 @@ try
 
     IProgress<long> progress = new Progress<long>(count =>
     {
-        Console.WriteLine($"0x{count:x8} ({(float)count / totalCount:P})");
+        Console.Error.WriteLine($"0x{count:x8} ({(float)count / totalCount:P})");
     });
 
     long completed = 0;
-    System.Timers.Timer progressTimer = new(500);
+    using System.Timers.Timer progressTimer = new(500);
     progressTimer.Elapsed += (_, _) =>
     {
         progress.Report(Volatile.Read(ref completed));
@@ -235,7 +234,7 @@ try
     Stopwatch procStopwatch = new();
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    bool MatchCodeAddress(uint address)
+    static bool MatchCodeAddress(uint address)
     {
         // Lowest bit set for Thumb instructions
         if ((address & 1) == 0) return false;
@@ -252,6 +251,14 @@ try
         return true;
     }
 
+    void CancelHandler(object? sender, ConsoleCancelEventArgs e)
+    {
+        cts.Cancel();
+        e.Cancel = true;
+    }
+
+    Console.CancelKeyPress += CancelHandler;
+
     try
     {
         progressTimer.Start();
@@ -261,7 +268,7 @@ try
             {
                 var state = new ThreadState
                 {
-                    roundIv = new byte[ivMaterial.Length],
+                    roundIv = new byte[16],
                     aesForIv = new(),
                     aesForRound = new()
                 };
@@ -332,17 +339,14 @@ try
 
                         if (match)
                         {
-                            byte[] captureDecrypted = new byte[16];
+                            byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
                             var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
                             captureUIntSpan[0] = sp;
                             captureUIntSpan[1] = reset;
                             captureUIntSpan[2] = nmi;
                             captureUIntSpan[3] = hardFault;
 
-                            lock (sync)
-                            {
-                                candidatesList.Add(new((uint)deviceKey, captureDecrypted));
-                            }
+                            threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
                         }
                     }
                 }
@@ -350,13 +354,20 @@ try
                 Interlocked.Add(ref completed, range.Item2 - range.Item1);
                 return threadState;
             },
-            _ => { });
+            threadState =>
+            {
+                lock (sync)
+                {
+                    candidatesList.AddRange(threadState.localList);
+                }
+            });
     }
     catch (OperationCanceledException)
     {
     }
     procStopwatch.Stop();
     progressTimer.Stop();
+    Console.CancelKeyPress -= CancelHandler;
 
     Console.Error.WriteLine($"Elapsed: {procStopwatch.Elapsed}");
     Console.Error.WriteLine();
@@ -397,4 +408,5 @@ class ThreadState
     public required byte[] roundIv;
     public AesEngine_X86 aesForRound;
     public AesEngine_X86 aesForIv;
+    public List<(uint, byte[])> localList = new();
 }
