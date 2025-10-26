@@ -268,7 +268,7 @@ try
             {
                 var state = new ThreadState
                 {
-                    roundIv = new byte[16],
+                    roundIv = GC.AllocateUninitializedArray<byte>(16),
                     aesForIv = new(),
                     aesForRound = new()
                 };
@@ -356,9 +356,12 @@ try
             },
             threadState =>
             {
-                lock (sync)
+                if (threadState.localList.Count != 0)
                 {
-                    candidatesList.AddRange(threadState.localList);
+                    lock (sync)
+                    {
+                        candidatesList.AddRange(threadState.localList);
+                    }
                 }
             });
     }
