@@ -119,7 +119,7 @@ Only fields relevant to code loading are included
     <td>Load table identifier</td>
   </tr>
   <tr>
-    <td>0x4</td>
+    <td>0x8</td>
     <td><code>LOAD_CFG</code></td>
     <td><code>uint32_t</code></td>
     <td>Packed struct; notable fields (hex value is mask):
