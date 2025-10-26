@@ -2,6 +2,8 @@
 using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Crypto.Parameters;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -213,6 +215,25 @@ try
         MaxDegreeOfParallelism = Environment.ProcessorCount,
     };
 
+    long totalCount = (long)uint.MaxValue + 1;
+    const long partitionSize = 0x100000;
+    var partitioner = Partitioner.Create(0, totalCount, partitionSize);
+    //Console.Error.WriteLine($"Partition size: 0x{partitionSize:x}");
+
+    IProgress<long> progress = new Progress<long>(count =>
+    {
+        Console.WriteLine($"0x{count:x8} ({(float)count / totalCount:P})");
+    });
+
+    long completed = 0;
+    System.Timers.Timer progressTimer = new(500);
+    progressTimer.Elapsed += (_, _) =>
+    {
+        progress.Report(Volatile.Read(ref completed));
+    };
+
+    Stopwatch procStopwatch = new();
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     bool MatchCodeAddress(uint address)
     {
@@ -233,7 +254,9 @@ try
 
     try
     {
-        Parallel.For(0, (long)uint.MaxValue + 1, options,
+        progressTimer.Start();
+        procStopwatch.Start();
+        Parallel.ForEach(partitioner, options,
             () =>
             {
                 var state = new ThreadState
@@ -251,76 +274,80 @@ try
 
                 return state;
             },
-            (deviceKey, _, threadState) =>
+            (range, _, threadState) =>
             {
-                if (deviceKey % 0x1000000 == 0) Console.Error.WriteLine($"0x{deviceKey:x8}");
-
-                /*
-                 * Iteration overview:
-                 * 1. Create the IV to use for next round
-                 *    - XOR device key on to first 16 bytes of firmware key
-                 *    - Encrypt using the second 16 bytes of firmware key
-                 * 2. Process mode-specific operation
-                 *    a. In OFB mode, the IV needs to be encrypted
-                 *    b. In CBC mode, the block needs to be decrypted, but since that is independent of the IV,
-                 *       it's precomputed
-                 * 3. Apply IV to block
-                 *    a. In OFB mode, the processed IV is XORed with the encrypted data
-                 *    b. in CBC mode, the IV is XORed with the decrypted data
-                 *
-                 * We're only interested in the first block, so don't need to think about what happens afterwards
-                 * (for CBC, we don't need the initial IV past the first block of each chunk. While decrypting
-                 * two blocks for OFB will allow us to be certain of the device key due to the reserved vectors
-                 * usually being filled with zeroes, it requires different optimization and isn't useful for
-                 * CBC mode).
-                 */
-
-                // Generate IV
-                byte[] roundIv = threadState.roundIv;
-                uint reversedDeviceKey = BinaryPrimitives.ReverseEndianness((uint)deviceKey);
-                var roundIvUIntSpan = MemoryMarshal.Cast<byte, uint>(roundIv);
-                roundIvUIntSpan[0] = iv0 ^ reversedDeviceKey;
-                roundIvUIntSpan[1] = iv1 ^ reversedDeviceKey;
-                roundIvUIntSpan[2] = iv2 ^ reversedDeviceKey;
-                roundIvUIntSpan[3] = iv3 ^ reversedDeviceKey;
-
-                threadState.aesForIv.ProcessBlock(roundIv, roundIv);
-
-                // Process block
-                if (aesMode == CipherMode.OFB)
+                for (long deviceKey = range.Item1; deviceKey < range.Item2; ++deviceKey)
                 {
-                    threadState.aesForRound.ProcessBlock(roundIv, roundIv);
-                }
+                    //if (deviceKey % 0x1000000 == 0) Console.Error.WriteLine($"0x{deviceKey:x8}");
 
-                uint sp = base0 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[3]);
-                // Front-load stack pointer check: within SRAM range + 8-byte alignment
-                if ((sp & 7) == 0 && sp >= 0x18000000 && sp < 0x18040000)
-                {
-                    uint reset = base1 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[2]);
-                    uint nmi = base2 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[1]);
-                    uint hardFault = base3 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[0]);
+                    /*
+                     * Iteration overview:
+                     * 1. Create the IV to use for next round
+                     *    - XOR device key on to first 16 bytes of firmware key
+                     *    - Encrypt using the second 16 bytes of firmware key
+                     * 2. Process mode-specific operation
+                     *    a. In OFB mode, the IV needs to be encrypted
+                     *    b. In CBC mode, the block needs to be decrypted, but since that is independent of the IV,
+                     *       it's precomputed
+                     * 3. Apply IV to block
+                     *    a. In OFB mode, the processed IV is XORed with the encrypted data
+                     *    b. in CBC mode, the IV is XORed with the decrypted data
+                     *
+                     * We're only interested in the first block, so don't need to think about what happens afterwards
+                     * (for CBC, we don't need the initial IV past the first block of each chunk. While decrypting
+                     * two blocks for OFB will allow us to be certain of the device key due to the reserved vectors
+                     * usually being filled with zeroes, it requires different optimization and isn't useful for
+                     * CBC mode).
+                     */
 
-                    // Check handlers
-                    bool match = MatchCodeAddress(reset);
-                    if (match) match &= MatchCodeAddress(nmi);
-                    if (match) match &= MatchCodeAddress(hardFault);
+                    // Generate IV
+                    byte[] roundIv = threadState.roundIv;
+                    uint reversedDeviceKey = BinaryPrimitives.ReverseEndianness((uint)deviceKey);
+                    var roundIvUIntSpan = MemoryMarshal.Cast<byte, uint>(roundIv);
+                    roundIvUIntSpan[0] = iv0 ^ reversedDeviceKey;
+                    roundIvUIntSpan[1] = iv1 ^ reversedDeviceKey;
+                    roundIvUIntSpan[2] = iv2 ^ reversedDeviceKey;
+                    roundIvUIntSpan[3] = iv3 ^ reversedDeviceKey;
 
-                    if (match)
+                    threadState.aesForIv.ProcessBlock(roundIv, roundIv);
+
+                    // Process block
+                    if (aesMode == CipherMode.OFB)
                     {
-                        byte[] captureDecrypted = new byte[16];
-                        var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
-                        captureUIntSpan[0] = sp;
-                        captureUIntSpan[1] = reset;
-                        captureUIntSpan[2] = nmi;
-                        captureUIntSpan[3] = hardFault;
+                        threadState.aesForRound.ProcessBlock(roundIv, roundIv);
+                    }
 
-                        lock (sync)
+                    uint sp = base0 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[3]);
+                    // Front-load stack pointer check: within SRAM range + 8-byte alignment
+                    if ((sp & 7) == 0 && sp >= 0x18000000 && sp < 0x18040000)
+                    {
+                        uint reset = base1 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[2]);
+                        uint nmi = base2 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[1]);
+                        uint hardFault = base3 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[0]);
+
+                        // Check handlers
+                        bool match = MatchCodeAddress(reset);
+                        if (match) match &= MatchCodeAddress(nmi);
+                        if (match) match &= MatchCodeAddress(hardFault);
+
+                        if (match)
                         {
-                            candidatesList.Add(new((uint)deviceKey, captureDecrypted));
+                            byte[] captureDecrypted = new byte[16];
+                            var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
+                            captureUIntSpan[0] = sp;
+                            captureUIntSpan[1] = reset;
+                            captureUIntSpan[2] = nmi;
+                            captureUIntSpan[3] = hardFault;
+
+                            lock (sync)
+                            {
+                                candidatesList.Add(new((uint)deviceKey, captureDecrypted));
+                            }
                         }
                     }
                 }
 
+                Interlocked.Add(ref completed, range.Item2 - range.Item1);
                 return threadState;
             },
             _ => { });
@@ -328,7 +355,10 @@ try
     catch (OperationCanceledException)
     {
     }
+    procStopwatch.Stop();
+    progressTimer.Stop();
 
+    Console.Error.WriteLine($"Elapsed: {procStopwatch.Elapsed}");
     Console.Error.WriteLine();
 
     int CountZeroes(byte[] arr)
