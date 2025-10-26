@@ -94,13 +94,13 @@ the IV is reset to the original derived IV every 0x1000 bytes.
 Both OFB mode and CBC mode are implemented as expected, aside from the reversed
 blocks and IV compared to standard AES.
 
-Only full multiple of blocks are processed. A partial block at the end will not
+Only full multiples of blocks are processed. A partial block at the end will not
 be decrypted. For V3, all decrypted data must be a multiple of block size to be
 successfully automatically encrypted.
 
 ## Load table details
 
-Only fields relevant to code loading included
+Only fields relevant to code loading are included
 
 ### Load table
 
@@ -173,6 +173,7 @@ Only fields relevant to code loading included
     <td><code>BOOT_PRIORITY</code></td>
     <td><code>vb_pri_boot_t[4]</code></td>
     <td>Priority boot table</td>
+  </tr>
   <tr>
     <td>0x140</td>
     <td><code>MANUAL_LOAD_num</code></td>
@@ -227,7 +228,7 @@ result in data corruption or boot failure if SPI NOR flash is attached.
 
 ### Priority boot entry
 
-Each entry 32 bytes
+Each entry is 32 bytes
 
 <table><thead>
   <tr>
@@ -265,7 +266,7 @@ Each entry 32 bytes
 
 ### Manual load entry
 
-V2-only, each entry 16 bytes
+V2-only, each entry is 16 bytes
 
 | Offset | Name           | Type       | Description                                               |
 |--------|----------------|------------|-----------------------------------------------------------|
@@ -357,18 +358,18 @@ some of the problems.
   allow manipulation of the plaintext, and CRC checking can be disabled by
   flipping a flag in the header. The bootrom also doesn't enforce the load table
   checksum, not that it's signed in any way either.
-- Failed attempt to protect sensitive logic/data: On SNC7330, there is a
-  hidden portion of the bootrom that contains the code loading logic, including
-  the encryption/decryption logic. Unfortunately, the protection is toggled on
-  by a couple of instructions, and they are easily neutralized by debug
-  facilities built into the CPU core. On SNC7320 the encryption logic is not
-  protected at all, which allows some insights to be gained into SNC7330's
-  process because of how similar the two device series are. Additionally, the
-  AES peripheral is not disabled after completing its usage, revealing
-  configuration state. It even allows key readback. Despite attempts to protect
-  the key when used for decryption, the AES peripheral can itself be used to
-  decrypt the masked key. This is where it is really apparent that the designers
-  of this chip knows nothing about making secure hardware.
+- Failed attempt to protect sensitive logic/data: On SNC7330, there is a hidden
+  portion of the bootrom that contains the code loading logic, including the
+  encryption/decryption logic. Unfortunately, the protection is toggled on by a
+  couple of instructions, and they are easily neutralized by debug facilities
+  built into the CPU core. On SNC7320 the encryption logic is not protected at
+  all, which allows some insights to be gained into SNC7330's process because of
+  how similar the two device series are. Additionally, the AES peripheral is not
+  disabled after completing its usage, revealing configuration state. It even
+  allows key readback. Despite attempts to protect the key when used for
+  decryption, the AES peripheral can itself be used to decrypt the masked key.
+  This is where it is really apparent that the designers of this chip knows
+  nothing about making secure hardware.
 
 Overall, just security theater. It's not real encryption, and even as DRM to
 bind firmware to specific devices, it fails pretty hard by not having unique
