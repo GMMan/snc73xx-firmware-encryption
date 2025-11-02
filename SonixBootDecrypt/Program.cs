@@ -1,12 +1,13 @@
 ﻿// See https://aka.ms/new-console-template for more information
-using Org.BouncyCastle.Crypto.Engines;
-using Org.BouncyCastle.Crypto.Parameters;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
+using AesIntrinsic = System.Runtime.Intrinsics.X86.Aes;
 
 const uint SPI_FLASH_ADDR = 0x60000000;
 const uint LOAD_TABLE_MAGIC = 0x5a5a0000;
@@ -84,6 +85,12 @@ bool IsLoadTableWithEncryption(BinaryReader br, uint baseOffset)
         return false;
 
     return true;
+}
+
+if (!AesIntrinsic.IsSupported || !Sse2.IsSupported)
+{
+    Console.Error.WriteLine("AES-NI and SSE2 support required.");
+    return 4;
 }
 
 if (args.Length != 1)
@@ -166,9 +173,159 @@ try
         >= LOAD_TABLE_V3 => CipherMode.CBC,
     };
 
+    #region Adapted from Org.BouncyCastle.Crypto.Engines.AesEngine_X86
+
+    /*
+     * Copyright (c) 2000-2025 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org).
+     * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+     * associated documentation files (the "Software"), to deal in the Software without restriction,
+     * including without limitation the rights to use, copy, modify, merge, publish, distribute,
+     * sub license, and/or sell copies of the Software, and to permit persons to whom the Software is
+     * furnished to do so, subject to the following conditions: The above copyright notice and this
+     * permission notice shall be included in all copies or substantial portions of the Software.
+     *
+     * **THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+     * NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+     * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+     * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+     * OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.**
+     */
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void AesCreateRoundKeys128(ReadOnlySpan<byte> key, Span<Vector128<byte>> K, bool forEncryption)
+    {
+        ReadOnlySpan<byte> rcon = stackalloc byte[] { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36 };
+
+        var s = MemoryMarshal.Read<Vector128<byte>>(key[..16]);
+        K[0] = s;
+
+        for (int round = 0; round < 10;)
+        {
+            var t = AesIntrinsic.KeygenAssist(s, rcon[round++]);
+            t = Sse2.Shuffle(t.AsInt32(), 0xFF).AsByte();
+            s = Sse2.Xor(s, Sse2.ShiftLeftLogical128BitLane(s, 8));
+            t = Sse2.Xor(t, s);
+            s = Sse2.Xor(t, Sse2.ShiftLeftLogical128BitLane(s, 4));
+            K[round] = s;
+        }
+
+        if (!forEncryption)
+        {
+            for (int i = 1, last = K.Length - 1; i < last; ++i)
+            {
+                K[i] = AesIntrinsic.InverseMixColumns(K[i]);
+            }
+
+            K.Reverse();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void AesCreateRoundKeys256(ReadOnlySpan<byte> key, Span<Vector128<byte>> K, bool forEncryption)
+    {
+        var s1 = MemoryMarshal.Read<Vector128<byte>>(key[..16]);
+        var s2 = MemoryMarshal.Read<Vector128<byte>>(key[16..32]);
+        K[0] = s1;
+        K[1] = s2;
+
+        byte rcon = 0x01;
+        for (int round = 1; ;)
+        {
+            var t1 = AesIntrinsic.KeygenAssist(s2, rcon); rcon <<= 1;
+            t1 = Sse2.Shuffle(t1.AsInt32(), 0xFF).AsByte();
+            s1 = Sse2.Xor(s1, Sse2.ShiftLeftLogical128BitLane(s1, 8));
+            t1 = Sse2.Xor(t1, s1);
+            s1 = Sse2.Xor(t1, Sse2.ShiftLeftLogical128BitLane(s1, 4));
+            K[++round] = s1;
+
+            if (round == 14)
+                break;
+
+            var t2 = AesIntrinsic.KeygenAssist(s1, 0x00);
+            t2 = Sse2.Shuffle(t2.AsInt32(), 0xAA).AsByte();
+            s2 = Sse2.Xor(s2, Sse2.ShiftLeftLogical128BitLane(s2, 8));
+            t2 = Sse2.Xor(t2, s2);
+            s2 = Sse2.Xor(t2, Sse2.ShiftLeftLogical128BitLane(s2, 4));
+            K[++round] = s2;
+        }
+
+        if (!forEncryption)
+        {
+            for (int i = 1, last = K.Length - 1; i < last; ++i)
+            {
+                K[i] = AesIntrinsic.InverseMixColumns(K[i]);
+            }
+
+            K.Reverse();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void AesDecrypt256(ReadOnlySpan<Vector128<byte>> roundKeys, ref Vector128<byte> state)
+    {
+        var bounds = roundKeys[14];
+        var value = Sse2.Xor(state, roundKeys[0]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[1]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[2]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[3]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[4]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[5]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[6]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[7]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[8]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[9]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[10]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[11]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[12]);
+        value = AesIntrinsic.Decrypt(value, roundKeys[13]);
+        state = AesIntrinsic.DecryptLast(value, roundKeys[14]);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void AesEncrypt128(ReadOnlySpan<Vector128<byte>> roundKeys, ref Vector128<byte> state)
+    {
+        var bounds = roundKeys[10];
+        var value = Sse2.Xor(state, roundKeys[0]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[1]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[2]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[3]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[4]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[5]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[6]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[7]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[8]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[9]);
+        state = AesIntrinsic.EncryptLast(value, roundKeys[10]);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void AesEncrypt256(ReadOnlySpan<Vector128<byte>> roundKeys, ref Vector128<byte> state)
+    {
+        var bounds = roundKeys[14];
+        var value = Sse2.Xor(state, roundKeys[0]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[1]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[2]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[3]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[4]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[5]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[6]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[7]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[8]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[9]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[10]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[11]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[12]);
+        value = AesIntrinsic.Encrypt(value, roundKeys[13]);
+        state = AesIntrinsic.EncryptLast(value, roundKeys[14]);
+    }
+
+    #endregion
+
     // Setup AES
-    KeyParameter keyParameterRound = new KeyParameter(inKey);
-    KeyParameter keyParameterIv = new KeyParameter(inKey, 0, 16);
+    var KRound = new Vector128<byte>[15];
+    var KIv = new Vector128<byte>[11];
+    AesCreateRoundKeys256(inKey, KRound, true);
+    AesCreateRoundKeys128(inKey.AsSpan().Slice(0, 16), KIv, true);
 
     // Precalculate some stuff for hot path
     byte[] cbcPrecalculated;
@@ -179,11 +336,12 @@ try
             baseUIntSpan = MemoryMarshal.Cast<byte, uint>(encrypted);
             break;
         case CipherMode.CBC:
-            AesEngine_X86 aesForRound = new();
-            aesForRound.Init(false, keyParameterRound);
+            Span<Vector128<byte>> K = stackalloc Vector128<byte>[15];
+            AesCreateRoundKeys256(inKey, K, false);
 
             cbcPrecalculated = ReverseArray(encrypted);
-            aesForRound.ProcessBlock(cbcPrecalculated, cbcPrecalculated);
+            ref var block = ref Unsafe.As<byte, Vector128<byte>>(ref cbcPrecalculated[0]);
+            AesDecrypt256(K, ref block);
             Array.Reverse(cbcPrecalculated);
 
             baseUIntSpan = MemoryMarshal.Cast<byte, uint>(cbcPrecalculated);
@@ -269,15 +427,7 @@ try
                 var state = new ThreadState
                 {
                     roundIv = GC.AllocateUninitializedArray<byte>(16),
-                    aesForIv = new(),
-                    aesForRound = new()
                 };
-
-                state.aesForIv.Init(true, keyParameterIv);
-                if (aesMode == CipherMode.OFB)
-                {
-                    state.aesForRound.Init(true, keyParameterRound);
-                }
 
                 return state;
             },
@@ -285,13 +435,12 @@ try
             {
                 for (long deviceKey = range.Item1; deviceKey < range.Item2; ++deviceKey)
                 {
-                    //if (deviceKey % 0x1000000 == 0) Console.Error.WriteLine($"0x{deviceKey:x8}");
-
                     /*
                      * Iteration overview:
-                     * 1. Create the IV to use for next round
-                     *    - XOR device key on to first 16 bytes of firmware key
-                     *    - Encrypt using the second 16 bytes of firmware key
+                     * -> Assume key already reversed to match how the on-device AES peripheral processes things
+                     * 1. Create the IV to use for this iteration
+                     *    - XOR device key on to second 16 bytes of firmware key
+                     *    - Encrypt using the first 16 bytes of firmware key
                      * 2. Process mode-specific operation
                      *    a. In OFB mode, the IV needs to be encrypted
                      *    b. In CBC mode, the block needs to be decrypted, but since that is independent of the IV,
@@ -316,12 +465,13 @@ try
                     roundIvUIntSpan[2] = iv2 ^ reversedDeviceKey;
                     roundIvUIntSpan[3] = iv3 ^ reversedDeviceKey;
 
-                    threadState.aesForIv.ProcessBlock(roundIv, roundIv);
+                    ref var block = ref Unsafe.As<byte, Vector128<byte>>(ref roundIv[0]);
+                    AesEncrypt128(KIv, ref block);
 
                     // Process block
                     if (aesMode == CipherMode.OFB)
                     {
-                        threadState.aesForRound.ProcessBlock(roundIv, roundIv);
+                        AesEncrypt256(KRound, ref block);
                     }
 
                     uint sp = base0 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[3]);
@@ -409,7 +559,5 @@ return 0;
 class ThreadState
 {
     public required byte[] roundIv;
-    public AesEngine_X86 aesForRound;
-    public AesEngine_X86 aesForIv;
     public List<(uint, byte[])> localList = new();
 }
