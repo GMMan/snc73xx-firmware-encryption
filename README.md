@@ -16,7 +16,7 @@ following strings: `SNC7320`, `SN323200`, `SNUR00`, `SN98300`, `SONIXDEV`, and
 for SPI NAND media, `SNCSPINF`.
 
 There are two versions of the load table. To identify which version, read the
-word (32-bit, little-endian) at offset +0x1fc of the table. Value `0x5a5a0002`
+word (32-bit, little-endian) at offset +0x1f8 of the table. Value `0x5a5a0002`
 indicates a load table for SNC7320, while a value of `0x5a5a0033` indicates a
 load table for SNC7330/SNC7340 (hereafter referred to as just SNC7330 because
 the bootrom is the same between both series). We will refer to the table for
