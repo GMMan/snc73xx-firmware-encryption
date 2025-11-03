@@ -345,6 +345,7 @@ try
             cbcPrecalculated = ReverseArray(encrypted);
             var block = MemoryMarshal.Read<Vector128<byte>>(cbcPrecalculated);
             AesDecrypt256(K, ref block);
+            MemoryMarshal.Write(cbcPrecalculated, block);
             Array.Reverse(cbcPrecalculated);
 
             baseUIntSpan = MemoryMarshal.Cast<byte, uint>(cbcPrecalculated);
