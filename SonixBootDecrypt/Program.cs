@@ -1,4 +1,7 @@
 ﻿// See https://aka.ms/new-console-template for more information
+
+#define USE_SSSE3 // Enable SSSE3 optimization
+
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -355,11 +358,12 @@ try
     uint base2 = baseUIntSpan[2];
     uint base3 = baseUIntSpan[3];
 
-    var ivMaterialUIntSpan = MemoryMarshal.Cast<byte, uint>(inKey.AsSpan(0x10, 0x10));
-    uint iv0 = ivMaterialUIntSpan[0];
-    uint iv1 = ivMaterialUIntSpan[1];
-    uint iv2 = ivMaterialUIntSpan[2];
-    uint iv3 = ivMaterialUIntSpan[3];
+#if USE_SSSE3
+    var baseVector = Unsafe.As<uint, Vector128<uint>>(ref baseUIntSpan[0]);
+    var shuffleMask = Vector128.Create((byte)15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+#endif
+
+    var ivMaterialVector = Unsafe.As<byte, Vector128<uint>>(ref inKey[0x10]);
 
     // Setup parallelism
     List<(uint candidate, byte[] decryption)> candidatesList = new();
@@ -424,12 +428,7 @@ try
         Parallel.ForEach(partitioner, options,
             () =>
             {
-                var state = new ThreadState
-                {
-                    roundIv = GC.AllocateUninitializedArray<byte>(16),
-                };
-
-                return state;
+                return new ThreadState();
             },
             (range, _, threadState) =>
             {
@@ -457,15 +456,11 @@ try
                      */
 
                     // Generate IV
-                    byte[] roundIv = threadState.roundIv;
                     uint reversedDeviceKey = BinaryPrimitives.ReverseEndianness((uint)deviceKey);
-                    var roundIvUIntSpan = MemoryMarshal.Cast<byte, uint>(roundIv);
-                    roundIvUIntSpan[0] = iv0 ^ reversedDeviceKey;
-                    roundIvUIntSpan[1] = iv1 ^ reversedDeviceKey;
-                    roundIvUIntSpan[2] = iv2 ^ reversedDeviceKey;
-                    roundIvUIntSpan[3] = iv3 ^ reversedDeviceKey;
+                    var multiDeviceKeys = Vector128.Create(reversedDeviceKey, reversedDeviceKey, reversedDeviceKey, reversedDeviceKey);
+                    var uintBlock = Sse2.Xor(ivMaterialVector, multiDeviceKeys);
+                    var block = uintBlock.AsByte();
 
-                    ref var block = ref Unsafe.As<byte, Vector128<byte>>(ref roundIv[0]);
                     AesEncrypt128(KIv, ref block);
 
                     // Process block
@@ -474,27 +469,56 @@ try
                         AesEncrypt256(KRound, ref block);
                     }
 
-                    uint sp = base0 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[3]);
-                    // Front-load stack pointer check: within SRAM range + 8-byte alignment
-                    if ((sp & 7) == 0 && sp >= 0x18000000 && sp < 0x18040000)
+                    uintBlock = block.AsUInt32();
+
+#if USE_SSSE3
+                    if (Ssse3.IsSupported)
                     {
-                        uint reset = base1 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[2]);
-                        uint nmi = base2 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[1]);
-                        uint hardFault = base3 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[0]);
+                        var revBlock = Ssse3.Shuffle(block, shuffleMask).AsUInt32();
+                        var baseProcBlock = Sse2.Xor(baseVector, revBlock);
 
-                        // Check handlers
-                        if (MatchCodeAddress(reset) && MatchCodeAddress(nmi) && MatchCodeAddress(hardFault))
+                        // Front-load stack pointer check: within SRAM range + 8-byte alignment
+                        var sp = baseProcBlock[0];
+                        if ((sp & 7) == 0 && sp >= 0x18000000 && sp < 0x18040000)
                         {
-                            byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
-                            var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
-                            captureUIntSpan[0] = sp;
-                            captureUIntSpan[1] = reset;
-                            captureUIntSpan[2] = nmi;
-                            captureUIntSpan[3] = hardFault;
+                            // Check handlers
+                            if (MatchCodeAddress(baseProcBlock[1]) && MatchCodeAddress(baseProcBlock[2]) && MatchCodeAddress(baseProcBlock[3]))
+                            {
+                                byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
+                                var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
+                                baseProcBlock.CopyTo(captureUIntSpan);
 
-                            threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
+                                threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
+                            }
                         }
                     }
+                    else
+                    {
+#endif
+                        uint sp = base0 ^ BinaryPrimitives.ReverseEndianness(uintBlock[3]);
+                        // Front-load stack pointer check: within SRAM range + 8-byte alignment
+                        if ((sp & 7) == 0 && sp >= 0x18000000 && sp < 0x18040000)
+                        {
+                            uint reset = base1 ^ BinaryPrimitives.ReverseEndianness(uintBlock[2]);
+                            uint nmi = base2 ^ BinaryPrimitives.ReverseEndianness(uintBlock[1]);
+                            uint hardFault = base3 ^ BinaryPrimitives.ReverseEndianness(uintBlock[0]);
+
+                            // Check handlers
+                            if (MatchCodeAddress(reset) && MatchCodeAddress(nmi) && MatchCodeAddress(hardFault))
+                            {
+                                byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
+                                var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
+                                captureUIntSpan[0] = sp;
+                                captureUIntSpan[1] = reset;
+                                captureUIntSpan[2] = nmi;
+                                captureUIntSpan[3] = hardFault;
+
+                                threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
+                            }
+                        }
+#if USE_SSSE3
+                    }
+#endif
                 }
 
                 Interlocked.Add(ref completed, range.Item2 - range.Item1);
@@ -554,6 +578,5 @@ return 0;
 
 class ThreadState
 {
-    public required byte[] roundIv;
     public List<(uint, byte[])> localList = new();
 }
