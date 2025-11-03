@@ -343,7 +343,7 @@ try
             AesCreateRoundKeys256(inKey, K, false);
 
             cbcPrecalculated = ReverseArray(encrypted);
-            ref var block = ref Unsafe.As<byte, Vector128<byte>>(ref cbcPrecalculated[0]);
+            var block = MemoryMarshal.Read<Vector128<byte>>(cbcPrecalculated);
             AesDecrypt256(K, ref block);
             Array.Reverse(cbcPrecalculated);
 
@@ -359,11 +359,11 @@ try
     uint base3 = baseUIntSpan[3];
 
 #if USE_SSSE3
-    var baseVector = Unsafe.As<uint, Vector128<uint>>(ref baseUIntSpan[0]);
+    var baseVector = MemoryMarshal.Read<Vector128<uint>>(MemoryMarshal.Cast<uint, byte>(baseUIntSpan));
     var shuffleMask = Vector128.Create((byte)15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 #endif
 
-    var ivMaterialVector = Unsafe.As<byte, Vector128<uint>>(ref inKey[0x10]);
+    var ivMaterialVector = MemoryMarshal.Read<Vector128<uint>>(inKey.AsSpan(0x10, 0x10));
 
     // Setup parallelism
     List<(uint candidate, byte[] decryption)> candidatesList = new();
@@ -578,5 +578,5 @@ return 0;
 
 class ThreadState
 {
-    public List<(uint, byte[])> localList = new();
+    public List<(uint, byte[])> localList = new(16);
 }
