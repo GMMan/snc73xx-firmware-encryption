@@ -483,11 +483,7 @@ try
                         uint hardFault = base3 ^ BinaryPrimitives.ReverseEndianness(roundIvUIntSpan[0]);
 
                         // Check handlers
-                        bool match = MatchCodeAddress(reset);
-                        if (match) match &= MatchCodeAddress(nmi);
-                        if (match) match &= MatchCodeAddress(hardFault);
-
-                        if (match)
+                        if (MatchCodeAddress(reset) && MatchCodeAddress(nmi) && MatchCodeAddress(hardFault))
                         {
                             byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
                             var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
