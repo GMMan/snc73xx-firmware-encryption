@@ -1,6 +1,6 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
-#define USE_SSSE3 // Enable SSSE3 optimization
+#define USE_SSSE3 // Enable SSSE3 optimization (may potentially be a bit slower)
 
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -367,7 +367,7 @@ try
     var ivMaterialVector = MemoryMarshal.Read<Vector128<uint>>(inKey.AsSpan(0x10, 0x10));
 
     // Setup parallelism
-    List<(uint candidate, byte[] decryption)> candidatesList = new();
+    List<(uint candidate, Vector128<uint> vectors)> candidatesList = new();
     object sync = new();
 
     using CancellationTokenSource cts = new();
@@ -485,11 +485,7 @@ try
                             // Check handlers
                             if (MatchCodeAddress(baseProcBlock[1]) && MatchCodeAddress(baseProcBlock[2]) && MatchCodeAddress(baseProcBlock[3]))
                             {
-                                byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
-                                var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
-                                baseProcBlock.CopyTo(captureUIntSpan);
-
-                                threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
+                                threadState.localList.Add(new((uint)deviceKey, baseProcBlock));
                             }
                         }
                     }
@@ -507,14 +503,7 @@ try
                             // Check handlers
                             if (MatchCodeAddress(reset) && MatchCodeAddress(nmi) && MatchCodeAddress(hardFault))
                             {
-                                byte[] captureDecrypted = GC.AllocateUninitializedArray<byte>(16);
-                                var captureUIntSpan = MemoryMarshal.Cast<byte, uint>(captureDecrypted);
-                                captureUIntSpan[0] = sp;
-                                captureUIntSpan[1] = reset;
-                                captureUIntSpan[2] = nmi;
-                                captureUIntSpan[3] = hardFault;
-
-                                threadState.localList.Add(new((uint)deviceKey, captureDecrypted));
+                                threadState.localList.Add(new((uint)deviceKey, Vector128.Create(sp, reset, nmi, hardFault)));
                             }
                         }
 #if USE_SSSE3
@@ -559,9 +548,14 @@ try
 
     if (candidatesList.Count > 0)
     {
-        foreach (var tup in candidatesList.OrderByDescending(t => CountZeroes(t.decryption)).ThenBy(t => t.candidate))
+        byte[] buf = GC.AllocateUninitializedArray<byte>(16);
+        foreach (var tup in candidatesList.OrderByDescending(t =>
         {
-            Console.WriteLine($"0x{tup.candidate:x8}: {BitConverter.ToUInt32(tup.decryption, 0):x8} {BitConverter.ToUInt32(tup.decryption, 4):x8} {BitConverter.ToUInt32(tup.decryption, 8):x8} {BitConverter.ToUInt32(tup.decryption, 12):x8}");
+            t.vectors.AsByte().CopyTo(buf);
+            return CountZeroes(buf);
+        }).ThenBy(t => t.candidate))
+        {
+            Console.WriteLine($"0x{tup.candidate:x8}: {tup.vectors[0]:x8} {tup.vectors[1]:x8} {tup.vectors[2]:x8} {tup.vectors[3]:x8}");
         }
     }
     else
@@ -579,5 +573,5 @@ return 0;
 
 class ThreadState
 {
-    public List<(uint, byte[])> localList = new(16);
+    public List<(uint, Vector128<uint>)> localList = new(16);
 }
