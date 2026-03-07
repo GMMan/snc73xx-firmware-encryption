@@ -137,7 +137,14 @@ try
             }
         }
 
-        if (loadTableFound) break;
+        if (loadTableFound)
+        {
+            if (fromEnd)
+            {
+                offset = (uint)(fs.Length - offset);
+            }
+            break;
+        }
 
         if (offset == 0)
         {
@@ -535,7 +542,7 @@ try
     Console.Error.WriteLine($"Elapsed: {procStopwatch.Elapsed}");
     Console.Error.WriteLine();
 
-    int CountZeroes(byte[] arr)
+    int CountZeroNibbles(byte[] arr)
     {
         int numZeroes = 0;
         foreach (var b in arr)
@@ -552,7 +559,7 @@ try
         foreach (var tup in candidatesList.OrderByDescending(t =>
         {
             t.vectors.AsByte().CopyTo(buf);
-            return CountZeroes(buf);
+            return CountZeroNibbles(buf);
         }).ThenBy(t => t.candidate))
         {
             Console.WriteLine($"0x{tup.candidate:x8}: {tup.vectors[0]:x8} {tup.vectors[1]:x8} {tup.vectors[2]:x8} {tup.vectors[3]:x8}");
