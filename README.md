@@ -344,7 +344,7 @@ some of the problems.
   low as 16 bits. This is all easily brute-forceable on modern hardware.
 - eFuses not protected: if you do happen to have access to the device, the
   bootrom enables SWD and a UART console by default if there is no valid
-  firmware, and on SNC7300, boot can be interrupted through UART or test mode
+  firmware, and on SNC7330, boot can be interrupted through UART or test mode
   sequence. The eFuses are directly readable through SWD or the UART console,
   easily revealing the last bit of secrecy.
 - Non-unique keys: the AES key tends to be left at the default of all zeroes on
@@ -368,7 +368,7 @@ some of the problems.
   disabled after completing its usage, revealing configuration state. It even
   allows key readback. Despite attempts to protect the key when used for
   decryption, the AES peripheral can itself be used to decrypt the masked key.
-  This is where it is really apparent that the designers of this chip knows
+  This is where it is really apparent that the designers of this chip know
   nothing about making secure hardware.
 
 Overall, just security theater. It's not real encryption, and even as DRM to
