@@ -23,21 +23,23 @@ the bootrom is the same between both series). We will refer to the table for
 SNC7320 as V2 and the one for SNC7330 as V3. SNC7330 can handle V2 load tables
 to a degree.
 
-After the table is read, the bootrom first checks for whether priority boot is
+For SPI NOR flash specifically, `MANUAL_TABLE_ADDR` is checked to see if there
+is a load table override address. If there is, the new table is loaded. If that
+table fails the boot process, the previous table is returned to.
+
+After the table is read, the bootrom checks for whether priority boot is
 enabled, and scans through priority boot devices if it is. This allows the usage
 of load tables on a different boot device for upgrade and recovery purposes.
 Priority boot is not available when booting from SD card, and cannot be nested.
-For whichever load table is ultimately picked, there is a manual load table
-address which can be specified to redirect to another load table (which also
-supports priority boot, if the original table was not found during priority boot
-scanning).
+SPI NOR flash load table override can be used when priority boot is being
+processed.
 
 After the final load table is selected, the bootrom will load (and decrypt if
 necessary) the main code into PRAM. If the load table is V2, additional sections
-specified in the manual load table will be loaded (and decrypted if necessary).
-For load table V3, additional SRAM code and deep power down (DPD) code will be
-loaded (and decrypted) if specified. As implemented, additional load is only
-supported when booting from SPI NOR flash, and DPD code is ignored.
+specified in the manual load entries will be loaded (and decrypted if
+necessary). For load table V3, additional SRAM code and deep power down (DPD)
+code will be loaded (and decrypted) if specified. As implemented, additional
+load is only supported when booting from SPI NOR flash, and DPD code is ignored.
 
 After all code has been loaded, the bootrom will either perform a software reset
 into the user application, or jump to it, depending on flag values.
@@ -159,7 +161,7 @@ Only fields relevant to code loading are included
     <td>0x68</td>
     <td><code>MANUAL_TABLE_ADDR</code></td>
     <td><code>uint32_t</code></td>
-    <td>Manual load table address for SPI NOR boot; requires valid XIP address
+    <td>Load table override address for SPI NOR boot; requires valid XIP address
     if used</td>
   </tr>
   <tr>
